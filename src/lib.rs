@@ -6,7 +6,7 @@
 //! over-determine the object and reconstruct it EXACTLY. This is the honest "double binary black
 //! hole": two poles cut the fiber `P1^-1(s1) ∩ P2^-1(s2)` to a singleton.
 //!
-//! Mechanism: CRT over prime cylinders (the Asolaria CRT-prime-lane). For a block `x < R`:
+//! Mechanism: CRT over coprime cylinders (the Asolaria CRT-coprime-cylinder lane). For a block `x < R`:
 //!   shadow1 = x mod p1,  shadow2 = x mod p2  (p1,p2 coprime).
 //!   If `p1*p2 >= R` the pair uniquely determines `x` (CRT) — exact recovery, NO STORE.
 //!   If `p1*p2 < R` the two shadows don't jointly carry `log2(R)` bits -> HELD (the Shannon
@@ -57,6 +57,8 @@ pub enum Held {
     InvalidCylinderSelection,
     /// Multi-cylinder shadow lanes have inconsistent block counts.
     MismatchedShadowCount,
+    /// A selected cylinder residue disagrees with the recovered block.
+    InconsistentResidue,
     /// A pixels-first world slice has impossible dimensions or length.
     InvalidSliceGeometry,
     /// A pixels-first world slice byte frame is malformed.
@@ -81,7 +83,7 @@ pub fn two_shadow_recover(s1: u64, p1: u64, s2: u64, p2: u64, range: u128) -> Re
 }
 
 // ------------------------------------------------------------ bytes generalization
-/// A two-shadow codec over prime cylinders for arbitrary byte objects. `block_bytes`-sized
+/// A two-shadow codec over coprime cylinders for arbitrary byte objects. `block_bytes`-sized
 /// blocks are each shadowed by residues mod `p1` and `p2`; recovery is per-block CRT.
 /// Invariant checked at construction: `p1*p2 >= 2^(8*block_bytes)` (else recovery would be lossy).
 #[derive(Debug, Clone, Copy)]
@@ -101,7 +103,7 @@ pub struct Shadows {
 }
 
 impl TwoShadow {
-    /// Default prime cylinders (~2^25 each; product ~2^50 > 2^48 for 6-byte blocks).
+    /// Default coprime cylinders (~2^25 each; product ~2^50 > 2^48 for 6-byte blocks).
     pub const P1: u64 = 33_554_467; // prime just above 2^25
     pub const P2: u64 = 33_554_393; // prime just below 2^25 (coprime to P1)
 
@@ -208,21 +210,31 @@ fn block_range_for(block_bytes: usize) -> Option<u128> {
     Some(1u128 << (8 * block_bytes as u32))
 }
 
-/// Product of coprime cylinders, or Held if they cannot form a CRT basis.
-pub fn joint_modulus(primes: &[u64]) -> Result<u128, Held> {
-    if primes.is_empty() {
+fn validate_coprime_moduli(moduli: &[u64]) -> Result<(), Held> {
+    if moduli.is_empty() {
         return Err(Held::InvalidCylinderSelection);
     }
-    let mut product = 1u128;
-    for (i, &p) in primes.iter().enumerate() {
+    for (i, &p) in moduli.iter().enumerate() {
         if p < 2 {
             return Err(Held::NonCoprimeModuli);
         }
-        for &q in &primes[..i] {
+        for &q in &moduli[..i] {
             if gcd_u128(p as u128, q as u128) != 1 {
                 return Err(Held::NonCoprimeModuli);
             }
         }
+    }
+    Ok(())
+}
+
+/// Product of coprime cylinders, or Held if they cannot form a CRT basis.
+///
+/// This exact product is intentionally u128-bounded. Use joint_modulus_capped for proof lanes
+/// that only need to know whether the product reaches a block range.
+pub fn joint_modulus(moduli: &[u64]) -> Result<u128, Held> {
+    validate_coprime_moduli(moduli)?;
+    let mut product = 1u128;
+    for &p in moduli {
         product = product
             .checked_mul(p as u128)
             .ok_or(Held::InsufficientJointCapacity)?;
@@ -230,10 +242,35 @@ pub fn joint_modulus(primes: &[u64]) -> Result<u128, Held> {
     Ok(product)
 }
 
-/// Integer floor(log2(product(primes))) without floating-point claims.
-pub fn joint_capacity_bits_floor(primes: &[u64]) -> Result<u32, Held> {
-    let m = joint_modulus(primes)?;
-    Ok(127 - m.leading_zeros())
+/// Product capped at cap. This prevents high-N cylinder receipts from false-Holding on u128
+/// overflow when the only needed fact is that the product already covers the slice roof.
+pub fn joint_modulus_capped(moduli: &[u64], cap: u128) -> Result<u128, Held> {
+    validate_coprime_moduli(moduli)?;
+    if cap <= 1 {
+        return Ok(cap);
+    }
+    let mut product = 1u128;
+    for &p in moduli {
+        let p = p as u128;
+        if product >= cap || product > (cap - 1) / p {
+            return Ok(cap);
+        }
+        product *= p;
+    }
+    Ok(product)
+}
+
+/// Conservative integer floor(log2(product(moduli))). For overflow-sized N, this returns a safe
+/// lower bound by summing per-cylinder floors, so receipts never collapse large capacity to zero.
+pub fn joint_capacity_bits_floor(moduli: &[u64]) -> Result<u32, Held> {
+    validate_coprime_moduli(moduli)?;
+    match joint_modulus(moduli) {
+        Ok(m) => Ok(127 - m.leading_zeros()),
+        Err(Held::InsufficientJointCapacity) => {
+            Ok(moduli.iter().map(|&m| 63 - m.leading_zeros()).sum())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Integer ceil(log2(n)) for selector-bit accounting. `n=1` needs zero selector bits.
@@ -254,28 +291,28 @@ fn ceil_div_u128(a: u128, b: u128) -> Result<u128, Held> {
 
 /// Number of candidates left after the selected cylinder product constrains a block range.
 /// This is the precise "fiber size" that the N-Q-prism has not collapsed yet.
-pub fn residual_candidate_count_for(block_bytes: usize, primes: &[u64]) -> Result<u128, Held> {
+pub fn residual_candidate_count_for(block_bytes: usize, moduli: &[u64]) -> Result<u128, Held> {
     let range = block_range_for(block_bytes).ok_or(Held::InsufficientJointCapacity)?;
-    let modulus = joint_modulus(primes)?;
+    let modulus = joint_modulus_capped(moduli, range)?;
     ceil_div_u128(range, modulus)
 }
 
 /// Bits still needed to select one candidate after the shared atlas/cylinders have constrained it.
 /// This is where a transfer can honestly fall to 1 or 2 bits: not because entropy vanished, but
-/// because the Brown-Hilbert/PID/prime-cylinder context already paid most of the information.
-pub fn residual_selector_bits_for(block_bytes: usize, primes: &[u64]) -> Result<u32, Held> {
+/// because the Brown-Hilbert/PID/coprime-cylinder context already paid most of the information.
+pub fn residual_selector_bits_for(block_bytes: usize, moduli: &[u64]) -> Result<u32, Held> {
     Ok(ceil_log2_u128(residual_candidate_count_for(
         block_bytes,
-        primes,
+        moduli,
     )?))
 }
 
 /// Signed capacity margin against the block. Negative means underdetermined; zero means exact-ish;
 /// positive means overdetermined redundancy. This is the safe form of the "negative bits" intuition:
 /// the residual can go below zero only as a margin metric, never as literal sub-Shannon payload.
-pub fn signed_capacity_margin_bits_floor(block_bytes: usize, primes: &[u64]) -> Result<i32, Held> {
+pub fn signed_capacity_margin_bits_floor(block_bytes: usize, moduli: &[u64]) -> Result<i32, Held> {
     let block_bits = (8 * block_bytes) as i32;
-    Ok(joint_capacity_bits_floor(primes)? as i32 - block_bits)
+    Ok(joint_capacity_bits_floor(moduli)? as i32 - block_bits)
 }
 
 /// CRT over N pairwise-coprime cylinders. This is the multi-cylinder Path-2 join:
@@ -346,9 +383,31 @@ impl MultiCylinder {
     }
 
     pub fn sufficient_subset(&self, indices: &[usize]) -> Result<bool, Held> {
-        let primes = self.selected_primes(indices)?;
+        let moduli = self.selected_primes(indices)?;
         let range = self.block_range().ok_or(Held::InsufficientJointCapacity)?;
-        Ok(joint_modulus(&primes)? >= range)
+        Ok(joint_modulus_capped(&moduli, range)? >= range)
+    }
+
+    pub fn select_for_residual_bits(&self, target_bits: u32) -> Result<Vec<usize>, Held> {
+        let mut selected = Vec::new();
+        for idx in 0..self.primes.len() {
+            selected.push(idx);
+            if self.residual_selector_bits(&selected)? <= target_bits {
+                return Ok(selected);
+            }
+        }
+        Err(Held::InsufficientJointCapacity)
+    }
+
+    fn sufficient_prefix(&self, indices: &[usize]) -> Result<Vec<usize>, Held> {
+        let mut prefix = Vec::new();
+        for &idx in indices {
+            prefix.push(idx);
+            if self.sufficient_subset(&prefix)? {
+                return Ok(prefix);
+            }
+        }
+        Err(Held::InsufficientJointCapacity)
     }
 
     fn selected_primes(&self, indices: &[usize]) -> Result<Vec<u64>, Held> {
@@ -401,9 +460,8 @@ impl MultiCylinder {
         if shadows.residues.len() != self.primes.len() || shadows.block_bytes != self.block_bytes {
             return Err(Held::MismatchedShadowCount);
         }
-        if !self.sufficient_subset(indices)? {
-            return Err(Held::InsufficientJointCapacity);
-        }
+        let selected = self.selected_primes(indices)?;
+        let basis_indices = self.sufficient_prefix(indices)?;
         let block_count = shadows.residues.first().map(|r| r.len()).unwrap_or(0);
         if shadows.residues.iter().any(|r| r.len() != block_count) {
             return Err(Held::MismatchedShadowCount);
@@ -411,11 +469,16 @@ impl MultiCylinder {
         let bb = self.block_bytes;
         let mut out = Vec::with_capacity(block_count * bb);
         for block in 0..block_count {
-            let mut basis = Vec::with_capacity(indices.len());
-            for &idx in indices {
+            let mut basis = Vec::with_capacity(basis_indices.len());
+            for &idx in &basis_indices {
                 basis.push((shadows.residues[idx][block], self.primes[idx]));
             }
             let x = crt_many(&basis)?;
+            for (&idx, &modulus) in indices.iter().zip(selected.iter()) {
+                if shadow(x, modulus) != shadows.residues[idx][block] {
+                    return Err(Held::InconsistentResidue);
+                }
+            }
             for i in (0..bb).rev() {
                 out.push(((x >> (8 * i as u32)) & 0xFF) as u8);
             }
@@ -683,9 +746,9 @@ impl QPrismSlice3d {
                 self.sha256.sha16_hex()
             ));
         }
-        for (idx, prime) in codec.primes.iter().enumerate() {
+        for (idx, modulus) in codec.primes.iter().enumerate() {
             let cumulative = &codec.primes[..=idx];
-            rows.push(format!("Q3DCYL|id={}|idx={}|prime={}|blocks={}|capacity_bits_floor={}|residual_selector_bits={}|capacity_margin_bits_floor={}|shadow_clone=classical|json=0", slice_id, idx, prime, self.shadows.residues[idx].len(), joint_capacity_bits_floor(cumulative).unwrap_or(0), residual_selector_bits_for(codec.block_bytes, cumulative).unwrap_or(128), signed_capacity_margin_bits_floor(codec.block_bytes, cumulative).unwrap_or(-128)));
+            rows.push(format!("Q3DCYL|id={}|idx={}|coprime_modulus={}|blocks={}|capacity_bits_floor={}|residual_selector_bits={}|capacity_margin_bits_floor={}|shadow_clone=classical|json=0", slice_id, idx, modulus, self.shadows.residues[idx].len(), joint_capacity_bits_floor(cumulative).unwrap_or(0), residual_selector_bits_for(codec.block_bytes, cumulative).unwrap_or(128), signed_capacity_margin_bits_floor(codec.block_bytes, cumulative).unwrap_or(-128)));
         }
         for watcher in ["OMNISHANNON", "GNN", "REVERSE_GNN", "MTP1", "MTP2", "MTP3"] {
             rows.push(format!(
@@ -713,7 +776,7 @@ pub struct TaggedParticle {
 }
 
 /// A bounded pixels-first simulated-world slice. Its byte frame is the object projected into
-/// N-prime cylinders; sufficient cylinder shadows recover it exactly.
+/// N coprime cylinders; sufficient cylinder shadows recover it exactly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PiePixelSlice {
     pub width: u16,

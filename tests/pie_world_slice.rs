@@ -1,4 +1,4 @@
-//! PIE world-slice harness: pixels-first simulated universe over N-prime cylinders.
+//! PIE world-slice harness: pixels-first simulated universe over N coprime cylinders.
 //! No JSON, no Node: deterministic slices, HBP rows, and byte-identical-or-Held gates.
 use path2_two_shadow_recovery::*;
 
@@ -41,7 +41,7 @@ fn sample_slice() -> PiePixelSlice {
 }
 
 #[test]
-fn pie_slice_projects_to_n_prime_cylinders_and_recovers_pixels() {
+fn pie_slice_projects_to_n_coprime_cylinders_and_recovers_pixels() {
     let codec = MultiCylinder::default_60d();
     let slice = sample_slice();
     let projection = PieWorldProjection::project(&slice, &codec);
@@ -60,7 +60,7 @@ fn pie_slice_projects_to_n_prime_cylinders_and_recovers_pixels() {
 }
 
 #[test]
-fn insufficient_prime_cylinder_roof_holds_instead_of_predicting() {
+fn insufficient_coprime_cylinder_roof_holds_instead_of_predicting() {
     let codec = MultiCylinder::default_60d();
     let slice = sample_slice();
     let projection = PieWorldProjection::project(&slice, &codec);

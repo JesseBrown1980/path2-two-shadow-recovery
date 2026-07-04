@@ -7,7 +7,7 @@ This is the Liris-side extension for cross-fabric synthesis. It lifts Acer Path 
 ```text
 frozen slice
   -> classical wavelength branches: binary / hex / sha / BEHCS-64 / BEHCS-256 / BEHCS-1024 / HyperBEHCS-60D
-  -> N coprime prime cylinders
+  -> N coprime cylinders
   -> MTP1/MTP2/MTP3 + Omnishannon/GNN/reverse-GNN watcher rows
   -> HBI/HBP tuple rows, json=0
   -> exact recovery from any sufficient cylinder subset, or Held

@@ -20,7 +20,7 @@ fn three_cylinders_recover_eight_byte_slice_while_two_hold() {
 }
 
 #[test]
-fn calculable_slice_roof_rises_with_each_prime_cylinder() {
+fn calculable_slice_roof_rises_with_each_coprime_cylinder() {
     let codec = MultiCylinder::default_60d();
     assert!(codec.joint_capacity_bits_floor(&[0]).unwrap() < 64);
     assert!(codec.joint_capacity_bits_floor(&[0, 1]).unwrap() < 64);
@@ -72,4 +72,54 @@ fn sha256_and_host8_are_stable_tokens_for_the_slice() {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
     assert_eq!(hex_lower(&a.host8()), "ba7816bf8f01cfea");
+}
+
+#[test]
+fn all_seven_cylinders_recover_without_u128_false_hold() {
+    let codec = MultiCylinder::default_60d();
+    let data = b"all seven cylinders should add redundancy, not overflow into Held";
+    let shadows = codec.project(data);
+    let all = [0, 1, 2, 3, 4, 5, 6];
+
+    assert!(codec.sufficient_subset(&all).unwrap());
+    assert_eq!(codec.recover_from(&shadows, &all).unwrap(), data);
+    assert!(codec.joint_capacity_bits_floor(&all).unwrap() > 128);
+    assert!(codec.signed_capacity_margin_bits_floor(&all).unwrap() > 64);
+    assert_eq!(codec.residual_selector_bits(&all).unwrap(), 0);
+}
+
+#[test]
+fn receipt_capacity_never_zeroes_overflow_sized_cylinders() {
+    let codec = MultiCylinder::default_60d();
+    let slice = QPrismSlice3d::project(b"receipt capacity must not silently lose bits", &codec);
+    let rows = slice.hbp_rows(&codec, "LIRIS-CAPACITY-OVERFLOW-GUARD");
+    let joined = rows.join("\n");
+
+    assert!(joined.contains("coprime_modulus="));
+    assert!(!joined.contains("|prime="));
+    assert!(!joined.contains("capacity_bits_floor=0"));
+    assert!(joined.contains("capacity_margin_bits_floor="));
+}
+
+#[test]
+fn extra_cylinder_residues_are_consistency_checked_after_sufficient_prefix() {
+    let codec = MultiCylinder::default_60d();
+    let data = b"tamper with an extra cylinder after the first three recover";
+    let mut shadows = codec.project(data);
+    shadows.residues[6][0] = shadows.residues[6][0].wrapping_add(1) % codec.primes[6];
+
+    assert_eq!(
+        codec.recover_from(&shadows, &[0, 1, 2, 6]),
+        Err(Held::InconsistentResidue)
+    );
+}
+
+#[test]
+fn adaptive_n_q_prism_selects_until_target_residual_bits() {
+    let codec = MultiCylinder::default_60d();
+
+    assert_eq!(codec.select_for_residual_bits(16).unwrap(), vec![0, 1]);
+    assert_eq!(codec.residual_selector_bits(&[0, 1]).unwrap(), 15);
+    assert_eq!(codec.select_for_residual_bits(2).unwrap(), vec![0, 1, 2]);
+    assert_eq!(codec.residual_selector_bits(&[0, 1, 2]).unwrap(), 0);
 }

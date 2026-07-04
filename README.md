@@ -9,7 +9,7 @@ but the two together cut the fiber `P1⁻¹(s1) ∩ P2⁻¹(s2)` to a singleton 
 object **exactly, with no store anywhere.** This is the honest **double binary black hole**: two
 poles recover what neither holds.
 
-## Mechanism — CRT over prime cylinders (the Asolaria CRT-prime-lane)
+## Mechanism — CRT over coprime cylinders (the Asolaria CRT-coprime-cylinder lane)
 
 For a block `x < R` and coprime primes `p1, p2`:
 - `shadow1 = x mod p1`, `shadow2 = x mod p2` — each **lossy** (`x` and `x+k·p` share a shadow).
@@ -45,7 +45,7 @@ independently reaching one theorem) is itself a Path-2 event.
 ## Liris multi-cylinder 3D Q-PRISM slice harness
 
 This branch adds the Liris side of the cross-fabric synthesis: `MultiCylinder` +
-`QPrismSlice3d`. It generalizes the two-shadow proof to N coprime prime cylinders,
+`QPrismSlice3d`. It generalizes the two-shadow proof to N coprime cylinders,
 then projects a frozen slice into classical representation wavelengths: binary/hex/sha,
 BEHCS-64, BEHCS-256, BEHCS-1024, and a digest-derived HyperBEHCS-60D coordinate. The
 HBP rows end in `json=0` and carry no payload body.
@@ -57,12 +57,18 @@ See [`docs/LIRIS-MULTICYLINDER-QPRISM-SLICE.md`](docs/LIRIS-MULTICYLINDER-QPRISM
 ## Liris PIE world-slice harness
 
 This branch also adds the first falsifiable PIE cell: metatagged particles render into a
-pixels-first bounded slice, the slice projects into N-prime cylinder shadows, same-radius
+pixels-first bounded slice, the slice projects into N coprime cylinder shadows, same-radius
 pixels form a frequency-sphere view, and a deterministic LeWorld-style rule computes the
 next or previous slice byte-identically only after sufficient cylinder recovery. If two
 cylinders do not carry enough capacity, the system returns `Held::InsufficientJointCapacity`
 instead of inventing a future. See
 [`docs/LIRIS-PIE-WORLD-SLICE.md`](docs/LIRIS-PIE-WORLD-SLICE.md).
+
+The N-Q-prism residual selector lane measures how many bits remain after the shared
+Brown-Hilbert/PID/coprime-cylinder context collapses the fiber. `select_for_residual_bits`
+keeps adding cylinders until that residual is at or below the target; all extra cylinders
+are consistency-checked, and overflow-sized capacity receipts are capped/lower-bounded
+instead of silently printing zero.
 
 ## Tests
 
