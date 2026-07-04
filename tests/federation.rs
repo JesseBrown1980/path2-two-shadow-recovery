@@ -13,10 +13,14 @@ fn two_poles_recover_what_neither_holds() {
 
     let acer_pole = sh.shadow_a.clone(); // acer holds ONLY this (lossy)
     let liris_pole = sh.shadow_b.clone(); // liris holds ONLY this (lossy)
-    // the object `truth` is now conceptually dropped -- it lives in no store.
+                                          // the object `truth` is now conceptually dropped -- it lives in no store.
 
     // the join (double-binary consent) reconstructs the EXACT truth from two lossy poles
-    let joined = Shadows { shadow_a: acer_pole, shadow_b: liris_pole, orig_len: truth.len() };
+    let joined = Shadows {
+        shadow_a: acer_pole,
+        shadow_b: liris_pole,
+        orig_len: truth.len(),
+    };
     assert_eq!(ts.recover(&joined).unwrap(), truth);
 }
 
@@ -26,7 +30,11 @@ fn a_single_pole_recovers_nothing() {
     let ts = TwoShadow::new();
     let sh = ts.project(truth);
     // liris pole missing -> the acer pole alone cannot reconstruct
-    let acer_only = Shadows { shadow_a: sh.shadow_a, shadow_b: vec![0; sh.shadow_b.len()], orig_len: sh.orig_len };
+    let acer_only = Shadows {
+        shadow_a: sh.shadow_a,
+        shadow_b: vec![0; sh.shadow_b.len()],
+        orig_len: sh.orig_len,
+    };
     assert_ne!(ts.recover(&acer_only).unwrap(), truth);
 }
 
@@ -34,12 +42,20 @@ fn a_single_pole_recovers_nothing() {
 fn capacity_scales_honestly_with_cylinders_shannon_wall() {
     let ts = TwoShadow::new();
     assert!(ts.sufficient()); // 48-bit block fits two ~2^25 primes (joint ~2^50)
-    // a 7-byte (56-bit) block does NOT fit two ~2^25 primes -> HELD (the two shadows cannot
-    // jointly carry 56 bits; Shannon). Adding a third cylinder (pole) would be required.
-    let too_big = TwoShadow { p1: TwoShadow::P1, p2: TwoShadow::P2, block_bytes: 7 };
+                              // a 7-byte (56-bit) block does NOT fit two ~2^25 primes -> HELD (the two shadows cannot
+                              // jointly carry 56 bits; Shannon). Adding a third cylinder (pole) would be required.
+    let too_big = TwoShadow {
+        p1: TwoShadow::P1,
+        p2: TwoShadow::P2,
+        block_bytes: 7,
+    };
     assert!(!too_big.sufficient());
     assert_eq!(
-        too_big.recover(&Shadows { shadow_a: vec![1], shadow_b: vec![1], orig_len: 7 }),
+        too_big.recover(&Shadows {
+            shadow_a: vec![1],
+            shadow_b: vec![1],
+            orig_len: 7
+        }),
         Err(Held::InsufficientJointCapacity)
     );
 }
