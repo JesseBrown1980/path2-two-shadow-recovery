@@ -57,6 +57,10 @@ pub enum Held {
     InvalidCylinderSelection,
     /// Multi-cylinder shadow lanes have inconsistent block counts.
     MismatchedShadowCount,
+    /// A pixels-first world slice has impossible dimensions or length.
+    InvalidSliceGeometry,
+    /// A pixels-first world slice byte frame is malformed.
+    InvalidSliceEncoding,
 }
 
 /// CRT over two coprime moduli: the unique `x` in `[0, p1*p2)` with `x ≡ s1 (p1)`, `x ≡ s2 (p2)`.
@@ -634,6 +638,267 @@ impl QPrismSlice3d {
             rows.push(format!(
                 "Q3DWATCH|id={}|watcher={}|role=edge_capacity_and_recovery_guard|host8={}|json=0",
                 slice_id, watcher, self.host8_hex
+            ));
+        }
+        rows
+    }
+}
+
+// ------------------------------------------------------------ PIE pixels-first world slice lane
+/// A metatagged simulated-world particle rendered into a pixels-first slice.
+///
+/// This is classical representation data, not physical quantum cloning. The tag/frequency fields
+/// are deterministic control labels used to render and re-render a slice byte-identically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaggedParticle {
+    pub x: u16,
+    pub y: u16,
+    pub z: u16,
+    pub tag: u32,
+    pub frequency: u16,
+    pub intensity: u8,
+}
+
+/// A bounded pixels-first simulated-world slice. Its byte frame is the object projected into
+/// N-prime cylinders; sufficient cylinder shadows recover it exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PiePixelSlice {
+    pub width: u16,
+    pub height: u16,
+    pub tick: u64,
+    pub frequency: u16,
+    pub pixels: Vec<u8>,
+}
+
+impl PiePixelSlice {
+    pub fn new(
+        width: u16,
+        height: u16,
+        tick: u64,
+        frequency: u16,
+        pixels: Vec<u8>,
+    ) -> Result<Self, Held> {
+        let expected = width as usize * height as usize;
+        if width == 0 || height == 0 || expected == 0 || pixels.len() != expected {
+            return Err(Held::InvalidSliceGeometry);
+        }
+        Ok(Self {
+            width,
+            height,
+            tick,
+            frequency,
+            pixels,
+        })
+    }
+
+    pub fn from_particles(
+        width: u16,
+        height: u16,
+        tick: u64,
+        frequency: u16,
+        particles: &[TaggedParticle],
+    ) -> Result<Self, Held> {
+        if width == 0 || height == 0 {
+            return Err(Held::InvalidSliceGeometry);
+        }
+        let mut pixels = vec![0u8; width as usize * height as usize];
+        for p in particles {
+            let x = (p.x % width) as usize;
+            let y = (p.y % height) as usize;
+            let idx = y * width as usize + x;
+            let tag_mix = ((p.tag as u8) ^ (p.tag >> 8) as u8 ^ (p.z as u8)) & 0x1f;
+            let freq_mix = ((p.frequency ^ frequency) & 0xff) as u8;
+            pixels[idx] = pixels[idx].wrapping_add(p.intensity ^ tag_mix ^ freq_mix);
+        }
+        Self::new(width, height, tick, frequency, pixels)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(18 + self.pixels.len());
+        out.extend_from_slice(b"PIE1");
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+        out.extend_from_slice(&self.tick.to_be_bytes());
+        out.extend_from_slice(&self.frequency.to_be_bytes());
+        out.extend_from_slice(&self.pixels);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Held> {
+        if bytes.len() < 18 || &bytes[..4] != b"PIE1" {
+            return Err(Held::InvalidSliceEncoding);
+        }
+        let width = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let height = u16::from_be_bytes([bytes[6], bytes[7]]);
+        let tick = u64::from_be_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]);
+        let frequency = u16::from_be_bytes([bytes[16], bytes[17]]);
+        let pixels = bytes[18..].to_vec();
+        Self::new(width, height, tick, frequency, pixels)
+    }
+
+    /// Shell occupancy around the pixel-center. This is the discrete "sphere at frequency" view:
+    /// same-radius pixels form one frequency shell in the bounded slice.
+    pub fn frequency_shells(&self) -> Vec<FrequencyShell> {
+        let cx2 = self.width as i32 - 1;
+        let cy2 = self.height as i32 - 1;
+        let mut shells: Vec<FrequencyShell> = Vec::new();
+        for y in 0..self.height as usize {
+            for x in 0..self.width as usize {
+                let dx2 = (x as i32 * 2) - cx2;
+                let dy2 = (y as i32 * 2) - cy2;
+                let radius2 = (dx2 * dx2 + dy2 * dy2) as u32;
+                let idx = y * self.width as usize + x;
+                match shells.iter_mut().find(|s| s.radius2 == radius2) {
+                    Some(s) => {
+                        s.pixels += 1;
+                        s.energy = s.energy.wrapping_add(self.pixels[idx] as u64);
+                    }
+                    None => shells.push(FrequencyShell {
+                        radius2,
+                        frequency: self.frequency,
+                        pixels: 1,
+                        energy: self.pixels[idx] as u64,
+                    }),
+                }
+            }
+        }
+        shells.sort_by_key(|s| s.radius2);
+        shells
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrequencyShell {
+    pub radius2: u32,
+    pub frequency: u16,
+    pub pixels: usize,
+    pub energy: u64,
+}
+
+/// Deterministic LeWorld-style latent rule for a classical simulated universe.
+///
+/// If the state and rule are known, future and retrospective slices are computed byte-identically.
+/// If new entropy enters, this type is the wrong model and the caller must Hold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeWorldRule {
+    pub dx: i16,
+    pub dy: i16,
+    pub phase_delta: u16,
+    pub xor_key: u8,
+}
+
+impl LeWorldRule {
+    pub fn step(&self, slice: &PiePixelSlice) -> Result<PiePixelSlice, Held> {
+        let w = slice.width as usize;
+        let h = slice.height as usize;
+        let next_tick = slice.tick.wrapping_add(1);
+        let next_frequency = slice.frequency.wrapping_add(self.phase_delta);
+        let mut out = vec![0u8; slice.pixels.len()];
+        for y in 0..h {
+            for x in 0..w {
+                let dst_x = wrap_add(x, self.dx, w);
+                let dst_y = wrap_add(y, self.dy, h);
+                let src_idx = y * w + x;
+                let dst_idx = dst_y * w + dst_x;
+                out[dst_idx] = slice.pixels[src_idx] ^ self.mask(x, y, slice.tick, slice.frequency);
+            }
+        }
+        PiePixelSlice::new(slice.width, slice.height, next_tick, next_frequency, out)
+    }
+
+    pub fn backstep(&self, slice: &PiePixelSlice) -> Result<PiePixelSlice, Held> {
+        let w = slice.width as usize;
+        let h = slice.height as usize;
+        let prev_tick = slice.tick.wrapping_sub(1);
+        let prev_frequency = slice.frequency.wrapping_sub(self.phase_delta);
+        let mut out = vec![0u8; slice.pixels.len()];
+        for y in 0..h {
+            for x in 0..w {
+                let dst_x = wrap_add(x, self.dx, w);
+                let dst_y = wrap_add(y, self.dy, h);
+                let dst_idx = dst_y * w + dst_x;
+                let src_idx = y * w + x;
+                out[src_idx] = slice.pixels[dst_idx] ^ self.mask(x, y, prev_tick, prev_frequency);
+            }
+        }
+        PiePixelSlice::new(slice.width, slice.height, prev_tick, prev_frequency, out)
+    }
+
+    fn mask(&self, x: usize, y: usize, tick: u64, frequency: u16) -> u8 {
+        let t = (tick as u8).wrapping_mul(17);
+        let f = (frequency as u8).wrapping_mul(31);
+        self.xor_key ^ t ^ f ^ (x as u8).wrapping_mul(3) ^ (y as u8).wrapping_mul(5)
+    }
+}
+
+fn wrap_add(value: usize, delta: i16, modulus: usize) -> usize {
+    let m = modulus as i32;
+    ((value as i32 + delta as i32).rem_euclid(m)) as usize
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PieWorldProjection {
+    pub qprism: QPrismSlice3d,
+    pub shells: Vec<FrequencyShell>,
+}
+
+impl PieWorldProjection {
+    pub fn project(slice: &PiePixelSlice, codec: &MultiCylinder) -> Self {
+        Self {
+            qprism: QPrismSlice3d::project(&slice.to_bytes(), codec),
+            shells: slice.frequency_shells(),
+        }
+    }
+
+    pub fn recover_current(
+        &self,
+        codec: &MultiCylinder,
+        indices: &[usize],
+    ) -> Result<PiePixelSlice, Held> {
+        let bytes = codec.recover_from(&self.qprism.shadows, indices)?;
+        PiePixelSlice::from_bytes(&bytes)
+    }
+
+    pub fn predict_next(
+        &self,
+        rule: &LeWorldRule,
+        codec: &MultiCylinder,
+        indices: &[usize],
+    ) -> Result<PiePixelSlice, Held> {
+        let current = self.recover_current(codec, indices)?;
+        rule.step(&current)
+    }
+
+    pub fn predict_previous(
+        &self,
+        rule: &LeWorldRule,
+        codec: &MultiCylinder,
+        indices: &[usize],
+    ) -> Result<PiePixelSlice, Held> {
+        let current = self.recover_current(codec, indices)?;
+        rule.backstep(&current)
+    }
+
+    pub fn hbp_rows(&self, codec: &MultiCylinder, slice_id: &str) -> Vec<String> {
+        let mut rows = self.qprism.hbp_rows(codec, slice_id);
+        rows.push(format!(
+            "PIEWORLD|id={}|shells={}|sphere_view=frequency_shells|sha16={}|body_in_row=0|json=0",
+            slice_id,
+            self.shells.len(),
+            self.qprism.sha256.sha16_hex()
+        ));
+        for (idx, shell) in self.shells.iter().take(16).enumerate() {
+            rows.push(format!(
+                "PIESHELL|id={}|idx={}|radius2={}|frequency={}|pixels={}|energy={}|json=0",
+                slice_id, idx, shell.radius2, shell.frequency, shell.pixels, shell.energy
+            ));
+        }
+        for watcher in ["LEWORLD", "PIXELS_FIRST", "PIE_SHADOW_ROOF"] {
+            rows.push(format!(
+                "PIEWATCH|id={}|watcher={}|role=deterministic_slice_prediction_or_hold|host8={}|json=0",
+                slice_id, watcher, self.qprism.host8_hex
             ));
         }
         rows

@@ -54,6 +54,16 @@ The key measured property is the calculable slice roof: two ~25-bit cylinders ar
 enough for an 8-byte slice, three are enough, and every added cylinder raises the roof.
 See [`docs/LIRIS-MULTICYLINDER-QPRISM-SLICE.md`](docs/LIRIS-MULTICYLINDER-QPRISM-SLICE.md).
 
+## Liris PIE world-slice harness
+
+This branch also adds the first falsifiable PIE cell: metatagged particles render into a
+pixels-first bounded slice, the slice projects into N-prime cylinder shadows, same-radius
+pixels form a frequency-sphere view, and a deterministic LeWorld-style rule computes the
+next or previous slice byte-identically only after sufficient cylinder recovery. If two
+cylinders do not carry enough capacity, the system returns `Held::InsufficientJointCapacity`
+instead of inventing a future. See
+[`docs/LIRIS-PIE-WORLD-SLICE.md`](docs/LIRIS-PIE-WORLD-SLICE.md).
+
 ## Tests
 
 `cargo test` — unit + federation + Liris multi-cylinder Q-PRISM slice tests. All zero-dep, WSL/rustc.
