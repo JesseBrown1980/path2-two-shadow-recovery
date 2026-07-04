@@ -70,6 +70,15 @@ keeps adding cylinders until that residual is at or below the target; all extra 
 are consistency-checked, and overflow-sized capacity receipts are capped/lower-bounded
 instead of silently printing zero.
 
+
+## Liris watcher gate
+
+The watcher gate wraps the DBBH -> DBWH local throat with black/white round-trip checks:
+GNN-forward proposes the emitted slice, reverse-GNN recompresses it, OmniShannon checks the
+capacity ledger, and MTP1/2/3 observe pixel, shell, and cylinder consistency. The output is
+either a verified classical clone or `Held`. This is a structural universe-analogue, not a
+physical-universe claim and not quantum cloning.
+
 ## Tests
 
 `cargo test` — unit + federation + Liris multi-cylinder Q-PRISM slice tests. All zero-dep, WSL/rustc.

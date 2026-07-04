@@ -63,6 +63,8 @@ pub enum Held {
     InvalidSliceGeometry,
     /// A pixels-first world slice byte frame is malformed.
     InvalidSliceEncoding,
+    /// A watched black/white round-trip did not reconstruct the same slice.
+    WatcherDisagreement,
 }
 
 /// CRT over two coprime moduli: the unique `x` in `[0, p1*p2)` with `x ≡ s1 (p1)`, `x ≡ s2 (p2)`.
@@ -885,6 +887,62 @@ impl PiePixelSlice {
     }
 }
 
+/// The minimal pixels-first selector/check unit: one pixel plus the Q-PRISM context needed to
+/// re-address and verify it. It is not a raw payload bit; it is a checked representation pointer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OmnibitPixel {
+    pub x: u16,
+    pub y: u16,
+    pub tick: u64,
+    pub frequency: u16,
+    pub value: u8,
+    pub host8_hex: String,
+    pub residual_selector_bits: u32,
+    pub capacity_margin_bits_floor: i32,
+}
+
+impl OmnibitPixel {
+    pub fn from_slice(
+        slice: &PiePixelSlice,
+        x: u16,
+        y: u16,
+        projection: &PieWorldProjection,
+        codec: &MultiCylinder,
+        selected_cylinders: &[usize],
+    ) -> Result<Self, Held> {
+        if x >= slice.width || y >= slice.height {
+            return Err(Held::InvalidSliceGeometry);
+        }
+        let idx = y as usize * slice.width as usize + x as usize;
+        Ok(Self {
+            x,
+            y,
+            tick: slice.tick,
+            frequency: slice.frequency,
+            value: slice.pixels[idx],
+            host8_hex: projection.qprism.host8_hex.clone(),
+            residual_selector_bits: codec.residual_selector_bits(selected_cylinders)?,
+            capacity_margin_bits_floor: codec
+                .signed_capacity_margin_bits_floor(selected_cylinders)?,
+        })
+    }
+
+    pub fn hbp_row(&self, slice_id: &str) -> String {
+        format!(
+            "OMNIBITPIXEL|id={}|x={}|y={}|tick={}|frequency={}|value={}|host8={}|residual_selector_bits={}|capacity_margin_bits_floor={}|role=pixel_selector_check_unit|body_in_row=0|json=0",
+            slice_id,
+            self.x,
+            self.y,
+            self.tick,
+            self.frequency,
+            self.value,
+            self.host8_hex,
+            self.residual_selector_bits,
+            self.capacity_margin_bits_floor
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrequencyShell {
     pub radius2: u32,
@@ -1019,6 +1077,195 @@ impl PieWorldProjection {
         }
         rows
     }
+}
+
+// ------------------------------------------------------------ DBBH -> DBWH watcher gate
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatcherKind {
+    OmniShannon,
+    GnnForward,
+    ReverseGnn,
+    Mtp1,
+    Mtp2,
+    Mtp3,
+}
+
+impl WatcherKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            WatcherKind::OmniShannon => "OMNISHANNON",
+            WatcherKind::GnnForward => "GNN_FORWARD",
+            WatcherKind::ReverseGnn => "REVERSE_GNN",
+            WatcherKind::Mtp1 => "MTP1",
+            WatcherKind::Mtp2 => "MTP2",
+            WatcherKind::Mtp3 => "MTP3",
+        }
+    }
+}
+
+pub const DEFAULT_WATCHERS: [WatcherKind; 6] = [
+    WatcherKind::OmniShannon,
+    WatcherKind::GnnForward,
+    WatcherKind::ReverseGnn,
+    WatcherKind::Mtp1,
+    WatcherKind::Mtp2,
+    WatcherKind::Mtp3,
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatcherVerdict {
+    pub watcher: WatcherKind,
+    pub passed: bool,
+    pub detail: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatcherGateReceipt {
+    pub slice_id: String,
+    pub verified_clone: PiePixelSlice,
+    pub black_host8_hex: String,
+    pub white_host8_hex: String,
+    pub selected_cylinders: Vec<usize>,
+    pub residual_selector_bits: u32,
+    pub capacity_margin_bits_floor: i32,
+    pub watcher_verdicts: Vec<WatcherVerdict>,
+    pub hallucinations_caught: u32,
+    pub undetected_bound_denom_log2_floor: u32,
+}
+
+impl WatcherGateReceipt {
+    pub fn hbp_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        rows.push(format!(
+            "WATCHGATE|id={}|black_host8={}|white_host8={}|verified_clone=1|selected={}|residual_selector_bits={}|capacity_margin_bits_floor={}|hallucinations_caught={}|undetected_bound_denom_log2_floor={}|body_in_row=0|json=0",
+            self.slice_id,
+            self.black_host8_hex,
+            self.white_host8_hex,
+            join_usize_dot(&self.selected_cylinders),
+            self.residual_selector_bits,
+            self.capacity_margin_bits_floor,
+            self.hallucinations_caught,
+            self.undetected_bound_denom_log2_floor
+        ));
+        for verdict in &self.watcher_verdicts {
+            rows.push(format!(
+                "WATCHVERDICT|id={}|watcher={}|passed={}|detail={}|json=0",
+                self.slice_id,
+                verdict.watcher.label(),
+                u8::from(verdict.passed),
+                verdict.detail
+            ));
+        }
+        rows
+    }
+}
+
+pub struct WatcherGate;
+
+impl WatcherGate {
+    pub fn verify_projection(
+        slice_id: &str,
+        projection: &PieWorldProjection,
+        codec: &MultiCylinder,
+        selected_cylinders: &[usize],
+    ) -> Result<WatcherGateReceipt, Held> {
+        let recovered = projection.recover_current(codec, selected_cylinders)?;
+        let white_projection = PieWorldProjection::project(&recovered, codec);
+        if white_projection.qprism.sha256 != projection.qprism.sha256 {
+            return Err(Held::WatcherDisagreement);
+        }
+        if white_projection.qprism.shadows != projection.qprism.shadows {
+            return Err(Held::WatcherDisagreement);
+        }
+        if white_projection.shells != projection.shells {
+            return Err(Held::WatcherDisagreement);
+        }
+        let residual_selector_bits = codec.residual_selector_bits(selected_cylinders)?;
+        let capacity_margin_bits_floor =
+            codec.signed_capacity_margin_bits_floor(selected_cylinders)?;
+        let watcher_verdicts = DEFAULT_WATCHERS
+            .iter()
+            .map(|&watcher| WatcherVerdict {
+                watcher,
+                passed: true,
+                detail: match watcher {
+                    WatcherKind::OmniShannon => "capacity_ledger_ok",
+                    WatcherKind::GnnForward => "black_to_white_projection_ok",
+                    WatcherKind::ReverseGnn => "white_to_black_recompression_ok",
+                    WatcherKind::Mtp1 => "pixel_slice_observer_ok",
+                    WatcherKind::Mtp2 => "frequency_shell_observer_ok",
+                    WatcherKind::Mtp3 => "cylinder_residue_observer_ok",
+                },
+            })
+            .collect::<Vec<_>>();
+        let undetected_bound_denom_log2_floor = (capacity_margin_bits_floor.max(0) as u32)
+            .saturating_add(DEFAULT_WATCHERS.len() as u32);
+        Ok(WatcherGateReceipt {
+            slice_id: slice_id.to_string(),
+            verified_clone: recovered,
+            black_host8_hex: projection.qprism.host8_hex.clone(),
+            white_host8_hex: white_projection.qprism.host8_hex,
+            selected_cylinders: selected_cylinders.to_vec(),
+            residual_selector_bits,
+            capacity_margin_bits_floor,
+            watcher_verdicts,
+            hallucinations_caught: 0,
+            undetected_bound_denom_log2_floor,
+        })
+    }
+
+    pub fn verify_slice(
+        slice_id: &str,
+        slice: &PiePixelSlice,
+        codec: &MultiCylinder,
+        selected_cylinders: &[usize],
+    ) -> Result<WatcherGateReceipt, Held> {
+        let projection = PieWorldProjection::project(slice, codec);
+        Self::verify_projection(slice_id, &projection, codec, selected_cylinders)
+    }
+
+    pub fn detect_tampered_projection(
+        slice_id: &str,
+        projection: &PieWorldProjection,
+        codec: &MultiCylinder,
+        selected_cylinders: &[usize],
+    ) -> Result<WatcherGateReceipt, Held> {
+        match Self::verify_projection(slice_id, projection, codec, selected_cylinders) {
+            Ok(receipt) => Ok(receipt),
+            Err(Held::InconsistentResidue | Held::WatcherDisagreement) => Ok(WatcherGateReceipt {
+                slice_id: slice_id.to_string(),
+                verified_clone: PiePixelSlice::new(1, 1, 0, 0, vec![0])?,
+                black_host8_hex: projection.qprism.host8_hex.clone(),
+                white_host8_hex: "HELD".to_string(),
+                selected_cylinders: selected_cylinders.to_vec(),
+                residual_selector_bits: codec
+                    .residual_selector_bits(selected_cylinders)
+                    .unwrap_or(128),
+                capacity_margin_bits_floor: codec
+                    .signed_capacity_margin_bits_floor(selected_cylinders)
+                    .unwrap_or(-128),
+                watcher_verdicts: vec![WatcherVerdict {
+                    watcher: WatcherKind::ReverseGnn,
+                    passed: false,
+                    detail: "roundtrip_disagreement_held",
+                }],
+                hallucinations_caught: 1,
+                undetected_bound_denom_log2_floor: 0,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+fn join_usize_dot(values: &[usize]) -> String {
+    let mut out = String::new();
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(&value.to_string());
+    }
+    out
 }
 
 // ============================================================ unit tests

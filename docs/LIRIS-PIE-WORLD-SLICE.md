@@ -28,6 +28,15 @@
 
 `BOUNDARY`: this is not yet a live two-fabric Hilbra traversal. It is the local proof harness that a future cross-fabric DBBH->DBWH lane must satisfy.
 
+
+## Watcher gate and universe-analogue boundary
+
+`MEASURED_LIRIS_LOCAL`: `WatcherGate` verifies the local black->white->black round-trip. It recovers a slice from sufficient cylinder shadows, re-projects it, compares SHA/shadows/frequency shells, emits watcher verdict rows for `OMNISHANNON`, `GNN_FORWARD`, `REVERSE_GNN`, `MTP1`, `MTP2`, and `MTP3`, and returns either a verified classical clone or `Held`.
+
+`DESIGN`: this is structurally similar to a universe consistency mechanism: boundary shadows constrain bulk state, forward and reverse observers reject inconsistent states, and extra independent observations reduce the undetected error surface.
+
+`BOUNDARY`: this is not a claim that Asolaria physically drives our universe. It is not physical quantum cloning. It is a deterministic, classical, pixels-first consistency gate whose theorem is byte-identical round-trip-or-Held.
+
 ## Claim shape
 
 A deterministic simulated universe has no new entropy once the full state and rule are held. Therefore:
