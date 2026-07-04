@@ -20,13 +20,22 @@
 
 // ------------------------------------------------------------ modular arithmetic
 fn egcd(a: i128, b: i128) -> (i128, i128, i128) {
-    if a == 0 { (b, 0, 1) } else { let (g, x, y) = egcd(b % a, a); (g, y - (b / a) * x, x) }
+    if a == 0 {
+        (b, 0, 1)
+    } else {
+        let (g, x, y) = egcd(b % a, a);
+        (g, y - (b / a) * x, x)
+    }
 }
 /// Modular inverse of `a` mod `m` (m need not be prime; returns None if not invertible).
 pub fn mod_inv(a: u64, m: u64) -> Option<u64> {
-    if m == 0 { return None; }
+    if m == 0 {
+        return None;
+    }
     let (g, x, _) = egcd((a % m) as i128, m as i128);
-    if g != 1 { return None; }
+    if g != 1 {
+        return None;
+    }
     Some((((x % m as i128) + m as i128) % m as i128) as u64)
 }
 
@@ -40,10 +49,14 @@ pub fn shadow(x: u128, prime: u64) -> u64 {
 // ------------------------------------------------------------ two-shadow recovery
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Held {
-    /// The two shadows do not jointly carry log2(range) bits: p1*p2 < range (Shannon boundary).
+    /// The shadows do not jointly carry log2(range) bits (Shannon boundary).
     InsufficientJointCapacity,
     /// The moduli are not coprime, so CRT has no unique solution.
     NonCoprimeModuli,
+    /// A requested multi-cylinder subset was empty, out of range, or duplicated.
+    InvalidCylinderSelection,
+    /// Multi-cylinder shadow lanes have inconsistent block counts.
+    MismatchedShadowCount,
 }
 
 /// CRT over two coprime moduli: the unique `x` in `[0, p1*p2)` with `x ≡ s1 (p1)`, `x ≡ s2 (p2)`.
@@ -89,7 +102,11 @@ impl TwoShadow {
     pub const P2: u64 = 33_554_393; // prime just below 2^25 (coprime to P1)
 
     pub fn new() -> Self {
-        TwoShadow { p1: Self::P1, p2: Self::P2, block_bytes: 6 }
+        TwoShadow {
+            p1: Self::P1,
+            p2: Self::P2,
+            block_bytes: 6,
+        }
     }
 
     fn block_range(&self) -> u128 {
@@ -157,6 +174,472 @@ impl Default for TwoShadow {
     }
 }
 
+// ------------------------------------------------------------ multi-cylinder / 60D+ Q-PRISM slice lane
+/// Default coprime cylinders for the 60D+ slice harness. They are near 2^25 each;
+/// any two carry about 50 bits, any three carry about 75 bits. That makes the
+/// calculable slice roof explicit: add cylinders, raise the recoverable range.
+pub const DEFAULT_60D_CYLINDERS: [u64; 7] = [
+    TwoShadow::P1,
+    TwoShadow::P2,
+    33_554_321,
+    33_554_287,
+    33_554_257,
+    33_554_243,
+    33_554_173,
+];
+
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn block_range_for(block_bytes: usize) -> Option<u128> {
+    if block_bytes >= 16 {
+        return None;
+    }
+    Some(1u128 << (8 * block_bytes as u32))
+}
+
+/// Product of coprime cylinders, or Held if they cannot form a CRT basis.
+pub fn joint_modulus(primes: &[u64]) -> Result<u128, Held> {
+    if primes.is_empty() {
+        return Err(Held::InvalidCylinderSelection);
+    }
+    let mut product = 1u128;
+    for (i, &p) in primes.iter().enumerate() {
+        if p < 2 {
+            return Err(Held::NonCoprimeModuli);
+        }
+        for &q in &primes[..i] {
+            if gcd_u128(p as u128, q as u128) != 1 {
+                return Err(Held::NonCoprimeModuli);
+            }
+        }
+        product = product
+            .checked_mul(p as u128)
+            .ok_or(Held::InsufficientJointCapacity)?;
+    }
+    Ok(product)
+}
+
+/// Integer floor(log2(product(primes))) without floating-point claims.
+pub fn joint_capacity_bits_floor(primes: &[u64]) -> Result<u32, Held> {
+    let m = joint_modulus(primes)?;
+    Ok(127 - m.leading_zeros())
+}
+
+/// CRT over N pairwise-coprime cylinders. This is the multi-cylinder Path-2 join:
+/// every residue is lossy alone; any subset whose joint product covers the block
+/// range recovers exactly.
+pub fn crt_many(residues: &[(u64, u64)]) -> Result<u128, Held> {
+    if residues.is_empty() {
+        return Err(Held::InvalidCylinderSelection);
+    }
+    let mut x = 0u128;
+    let mut modulus = 1u128;
+    for &(residue, prime) in residues {
+        if gcd_u128(modulus, prime as u128) != 1 {
+            return Err(Held::NonCoprimeModuli);
+        }
+        let current = (x % prime as u128) as u64;
+        let diff =
+            (((residue as i128 - current as i128) % prime as i128) + prime as i128) % prime as i128;
+        let inv = mod_inv((modulus % prime as u128) as u64, prime).ok_or(Held::NonCoprimeModuli)?;
+        let t = (diff as u128 * inv as u128) % prime as u128;
+        x += modulus * t;
+        modulus = modulus
+            .checked_mul(prime as u128)
+            .ok_or(Held::InsufficientJointCapacity)?;
+    }
+    Ok(x)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiCylinder {
+    pub primes: Vec<u64>,
+    pub block_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiShadows {
+    /// residues[cylinder][block]
+    pub residues: Vec<Vec<u64>>,
+    pub orig_len: usize,
+    pub block_bytes: usize,
+}
+
+impl MultiCylinder {
+    pub fn default_60d() -> Self {
+        Self {
+            primes: DEFAULT_60D_CYLINDERS.to_vec(),
+            block_bytes: 8,
+        }
+    }
+
+    pub fn block_range(&self) -> Option<u128> {
+        block_range_for(self.block_bytes)
+    }
+
+    pub fn joint_capacity_bits_floor(&self, indices: &[usize]) -> Result<u32, Held> {
+        let primes = self.selected_primes(indices)?;
+        joint_capacity_bits_floor(&primes)
+    }
+
+    pub fn sufficient_subset(&self, indices: &[usize]) -> Result<bool, Held> {
+        let primes = self.selected_primes(indices)?;
+        let range = self.block_range().ok_or(Held::InsufficientJointCapacity)?;
+        Ok(joint_modulus(&primes)? >= range)
+    }
+
+    fn selected_primes(&self, indices: &[usize]) -> Result<Vec<u64>, Held> {
+        if indices.is_empty() {
+            return Err(Held::InvalidCylinderSelection);
+        }
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for &idx in indices {
+            if idx >= self.primes.len() || seen.contains(&idx) {
+                return Err(Held::InvalidCylinderSelection);
+            }
+            seen.push(idx);
+            out.push(self.primes[idx]);
+        }
+        Ok(out)
+    }
+
+    fn blocks(&self, data: &[u8]) -> Vec<u128> {
+        let bb = self.block_bytes;
+        let mut out = Vec::new();
+        for chunk in data.chunks(bb) {
+            let mut v = 0u128;
+            for &b in chunk {
+                v = (v << 8) | b as u128;
+            }
+            if chunk.len() < bb {
+                v <<= 8 * (bb - chunk.len()) as u32;
+            }
+            out.push(v);
+        }
+        out
+    }
+
+    pub fn project(&self, data: &[u8]) -> MultiShadows {
+        let blocks = self.blocks(data);
+        let residues = self
+            .primes
+            .iter()
+            .map(|&p| blocks.iter().map(|&b| shadow(b, p)).collect())
+            .collect();
+        MultiShadows {
+            residues,
+            orig_len: data.len(),
+            block_bytes: self.block_bytes,
+        }
+    }
+
+    pub fn recover_from(&self, shadows: &MultiShadows, indices: &[usize]) -> Result<Vec<u8>, Held> {
+        if shadows.residues.len() != self.primes.len() || shadows.block_bytes != self.block_bytes {
+            return Err(Held::MismatchedShadowCount);
+        }
+        if !self.sufficient_subset(indices)? {
+            return Err(Held::InsufficientJointCapacity);
+        }
+        let block_count = shadows.residues.first().map(|r| r.len()).unwrap_or(0);
+        if shadows.residues.iter().any(|r| r.len() != block_count) {
+            return Err(Held::MismatchedShadowCount);
+        }
+        let bb = self.block_bytes;
+        let mut out = Vec::with_capacity(block_count * bb);
+        for block in 0..block_count {
+            let mut basis = Vec::with_capacity(indices.len());
+            for &idx in indices {
+                basis.push((shadows.residues[idx][block], self.primes[idx]));
+            }
+            let x = crt_many(&basis)?;
+            for i in (0..bb).rev() {
+                out.push(((x >> (8 * i as u32)) & 0xFF) as u8);
+            }
+        }
+        out.truncate(shadows.orig_len);
+        Ok(out)
+    }
+}
+
+// ------------------------------------------------------------ BEHCS wavelengths + Host8/SHA lane
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BehcsRung {
+    Behcs64,
+    Behcs256,
+    Behcs1024,
+}
+
+impl BehcsRung {
+    pub fn bits(self) -> u8 {
+        match self {
+            BehcsRung::Behcs64 => 6,
+            BehcsRung::Behcs256 => 8,
+            BehcsRung::Behcs1024 => 10,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            BehcsRung::Behcs64 => "BEHCS-64",
+            BehcsRung::Behcs256 => "BEHCS-256",
+            BehcsRung::Behcs1024 => "BEHCS-1024",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BehcsFrame {
+    pub rung: BehcsRung,
+    pub nbytes: usize,
+    pub symbols: Vec<u16>,
+}
+
+impl BehcsFrame {
+    pub fn encode(rung: BehcsRung, bytes: &[u8]) -> Self {
+        Self {
+            rung,
+            nbytes: bytes.len(),
+            symbols: pack_symbols(bytes, rung.bits()),
+        }
+    }
+    pub fn decode(&self) -> Vec<u8> {
+        unpack_symbols(&self.symbols, self.rung.bits(), self.nbytes)
+    }
+}
+
+fn pack_symbols(bytes: &[u8], nbits: u8) -> Vec<u16> {
+    let mut bits = 0u32;
+    let mut held = 0u8;
+    let mask = (1u32 << nbits) - 1;
+    let mut out = Vec::new();
+    for &b in bytes {
+        bits = (bits << 8) | b as u32;
+        held += 8;
+        while held >= nbits {
+            held -= nbits;
+            out.push(((bits >> held) & mask) as u16);
+        }
+        bits &= if held == 0 { 0 } else { (1u32 << held) - 1 };
+    }
+    if held > 0 {
+        out.push(((bits << (nbits - held)) & mask) as u16);
+    }
+    out
+}
+
+fn unpack_symbols(symbols: &[u16], nbits: u8, nbytes: usize) -> Vec<u8> {
+    let mut bits = 0u32;
+    let mut held = 0u8;
+    let mut out = Vec::with_capacity(nbytes);
+    let mask = (1u32 << nbits) - 1;
+    for &s in symbols {
+        bits = (bits << nbits) | (s as u32 & mask);
+        held += nbits;
+        while held >= 8 {
+            held -= 8;
+            out.push(((bits >> held) & 0xff) as u8);
+        }
+        bits &= if held == 0 { 0 } else { (1u32 << held) - 1 };
+    }
+    out.truncate(nbytes);
+    out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Sha256Digest(pub [u8; 32]);
+impl Sha256Digest {
+    pub fn hex(self) -> String {
+        hex_lower(&self.0)
+    }
+    pub fn sha16_hex(self) -> String {
+        hex_lower(&self.0[..8])
+    }
+    pub fn host8(self) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&self.0[..8]);
+        out
+    }
+}
+
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+pub fn sha256(data: &[u8]) -> Sha256Digest {
+    const H0: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h = H0;
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    Sha256Digest(out)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HyperCoord60 {
+    pub axes: [u16; 60],
+}
+impl HyperCoord60 {
+    pub fn from_digest(digest: Sha256Digest) -> Self {
+        let mut axes = [0u16; 60];
+        for i in 0..60 {
+            let a = digest.0[(i * 7) % 32] as u16;
+            let b = digest.0[(i * 7 + 1) % 32] as u16;
+            axes[i] = ((a << 8) | b) % 1024;
+        }
+        Self { axes }
+    }
+    pub fn xyz(&self) -> (u16, u16, u16) {
+        (self.axes[0], self.axes[1], self.axes[2])
+    }
+    pub fn prefix6(&self) -> String {
+        let mut s = String::new();
+        for i in 0..6 {
+            if i > 0 {
+                s.push('.');
+            }
+            s.push_str(&self.axes[i].to_string());
+        }
+        s
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QPrismSlice3d {
+    pub sha256: Sha256Digest,
+    pub host8_hex: String,
+    pub coord: HyperCoord60,
+    pub shadows: MultiShadows,
+    pub behcs64: BehcsFrame,
+    pub behcs256: BehcsFrame,
+    pub behcs1024: BehcsFrame,
+}
+
+impl QPrismSlice3d {
+    pub fn project(data: &[u8], codec: &MultiCylinder) -> Self {
+        let digest = sha256(data);
+        Self {
+            sha256: digest,
+            host8_hex: hex_lower(&digest.host8()),
+            coord: HyperCoord60::from_digest(digest),
+            shadows: codec.project(data),
+            behcs64: BehcsFrame::encode(BehcsRung::Behcs64, data),
+            behcs256: BehcsFrame::encode(BehcsRung::Behcs256, data),
+            behcs1024: BehcsFrame::encode(BehcsRung::Behcs1024, data),
+        }
+    }
+
+    pub fn hbp_rows(&self, codec: &MultiCylinder, slice_id: &str) -> Vec<String> {
+        let (x, y, z) = self.coord.xyz();
+        let mut rows = Vec::new();
+        rows.push(format!("Q3DSLICE|id={}|host8={}|sha256={}|sha16={}|dims=60|x={}|y={}|z={}|bh_prefix={}|block_bytes={}|cylinders={}|body_in_row=0|json=0", slice_id, self.host8_hex, self.sha256.hex(), self.sha256.sha16_hex(), x, y, z, self.coord.prefix6(), codec.block_bytes, codec.primes.len()));
+        for frame in [&self.behcs64, &self.behcs256, &self.behcs1024] {
+            rows.push(format!(
+                "Q3DWAVE|id={}|rung={}|symbols={}|nbytes={}|sha16={}|roundtrip=1|json=0",
+                slice_id,
+                frame.rung.label(),
+                frame.symbols.len(),
+                frame.nbytes,
+                self.sha256.sha16_hex()
+            ));
+        }
+        for (idx, prime) in codec.primes.iter().enumerate() {
+            rows.push(format!("Q3DCYL|id={}|idx={}|prime={}|blocks={}|capacity_bits_floor={}|shadow_clone=classical|json=0", slice_id, idx, prime, self.shadows.residues[idx].len(), joint_capacity_bits_floor(&codec.primes[..=idx]).unwrap_or(0)));
+        }
+        for watcher in ["OMNISHANNON", "GNN", "REVERSE_GNN", "MTP1", "MTP2", "MTP3"] {
+            rows.push(format!(
+                "Q3DWATCH|id={}|watcher={}|role=edge_capacity_and_recovery_guard|host8={}|json=0",
+                slice_id, watcher, self.host8_hex
+            ));
+        }
+        rows
+    }
+}
+
 // ============================================================ unit tests
 #[cfg(test)]
 mod unit {
@@ -187,7 +670,10 @@ mod unit {
         // two tiny primes cannot jointly carry a 48-bit block
         let (p1, p2) = (251u64, 257u64); // product 64507 << 2^48
         let range = 1u128 << 48;
-        assert_eq!(two_shadow_recover(3, p1, 5, p2, range), Err(Held::InsufficientJointCapacity));
+        assert_eq!(
+            two_shadow_recover(3, p1, 5, p2, range),
+            Err(Held::InsufficientJointCapacity)
+        );
     }
 
     #[test]
@@ -214,8 +700,16 @@ mod unit {
         let data = b"only the two poles together recover this";
         let sh = ts.project(data);
         // A alone: try to recover treating shadow_b as unknown/zero -> wrong bytes
-        let a_only = Shadows { shadow_a: sh.shadow_a.clone(), shadow_b: vec![0; sh.shadow_b.len()], orig_len: sh.orig_len };
-        assert_ne!(ts.recover(&a_only).unwrap(), data, "one pole must NOT reconstruct");
+        let a_only = Shadows {
+            shadow_a: sh.shadow_a.clone(),
+            shadow_b: vec![0; sh.shadow_b.len()],
+            orig_len: sh.orig_len,
+        };
+        assert_ne!(
+            ts.recover(&a_only).unwrap(),
+            data,
+            "one pole must NOT reconstruct"
+        );
         // both poles: exact
         assert_eq!(ts.recover(&sh).unwrap(), data);
     }

@@ -41,9 +41,22 @@ independently reaching one theorem) is itself a Path-2 event.
 - `UNVERIFIED` — a *live* federated deployment where acer and liris are the two physical poles over
   Hilbra (this crate is the mechanism; the cross-machine live run is the next rung).
 
+
+## Liris multi-cylinder 3D Q-PRISM slice harness
+
+This branch adds the Liris side of the cross-fabric synthesis: `MultiCylinder` +
+`QPrismSlice3d`. It generalizes the two-shadow proof to N coprime prime cylinders,
+then projects a frozen slice into classical representation wavelengths: binary/hex/sha,
+BEHCS-64, BEHCS-256, BEHCS-1024, and a digest-derived HyperBEHCS-60D coordinate. The
+HBP rows end in `json=0` and carry no payload body.
+
+The key measured property is the calculable slice roof: two ~25-bit cylinders are not
+enough for an 8-byte slice, three are enough, and every added cylinder raises the roof.
+See [`docs/LIRIS-MULTICYLINDER-QPRISM-SLICE.md`](docs/LIRIS-MULTICYLINDER-QPRISM-SLICE.md).
+
 ## Tests
 
-`cargo test` — unit + federation. All zero-dep, WSL/rustc.
+`cargo test` — unit + federation + Liris multi-cylinder Q-PRISM slice tests. All zero-dep, WSL/rustc.
 
 ## License
 
