@@ -236,6 +236,48 @@ pub fn joint_capacity_bits_floor(primes: &[u64]) -> Result<u32, Held> {
     Ok(127 - m.leading_zeros())
 }
 
+/// Integer ceil(log2(n)) for selector-bit accounting. `n=1` needs zero selector bits.
+pub fn ceil_log2_u128(n: u128) -> u32 {
+    if n <= 1 {
+        0
+    } else {
+        128 - (n - 1).leading_zeros()
+    }
+}
+
+fn ceil_div_u128(a: u128, b: u128) -> Result<u128, Held> {
+    if b == 0 {
+        return Err(Held::InvalidCylinderSelection);
+    }
+    Ok(a / b + u128::from(a % b != 0))
+}
+
+/// Number of candidates left after the selected cylinder product constrains a block range.
+/// This is the precise "fiber size" that the N-Q-prism has not collapsed yet.
+pub fn residual_candidate_count_for(block_bytes: usize, primes: &[u64]) -> Result<u128, Held> {
+    let range = block_range_for(block_bytes).ok_or(Held::InsufficientJointCapacity)?;
+    let modulus = joint_modulus(primes)?;
+    ceil_div_u128(range, modulus)
+}
+
+/// Bits still needed to select one candidate after the shared atlas/cylinders have constrained it.
+/// This is where a transfer can honestly fall to 1 or 2 bits: not because entropy vanished, but
+/// because the Brown-Hilbert/PID/prime-cylinder context already paid most of the information.
+pub fn residual_selector_bits_for(block_bytes: usize, primes: &[u64]) -> Result<u32, Held> {
+    Ok(ceil_log2_u128(residual_candidate_count_for(
+        block_bytes,
+        primes,
+    )?))
+}
+
+/// Signed capacity margin against the block. Negative means underdetermined; zero means exact-ish;
+/// positive means overdetermined redundancy. This is the safe form of the "negative bits" intuition:
+/// the residual can go below zero only as a margin metric, never as literal sub-Shannon payload.
+pub fn signed_capacity_margin_bits_floor(block_bytes: usize, primes: &[u64]) -> Result<i32, Held> {
+    let block_bits = (8 * block_bytes) as i32;
+    Ok(joint_capacity_bits_floor(primes)? as i32 - block_bits)
+}
+
 /// CRT over N pairwise-coprime cylinders. This is the multi-cylinder Path-2 join:
 /// every residue is lossy alone; any subset whose joint product covers the block
 /// range recovers exactly.
@@ -291,6 +333,16 @@ impl MultiCylinder {
     pub fn joint_capacity_bits_floor(&self, indices: &[usize]) -> Result<u32, Held> {
         let primes = self.selected_primes(indices)?;
         joint_capacity_bits_floor(&primes)
+    }
+
+    pub fn residual_selector_bits(&self, indices: &[usize]) -> Result<u32, Held> {
+        let primes = self.selected_primes(indices)?;
+        residual_selector_bits_for(self.block_bytes, &primes)
+    }
+
+    pub fn signed_capacity_margin_bits_floor(&self, indices: &[usize]) -> Result<i32, Held> {
+        let primes = self.selected_primes(indices)?;
+        signed_capacity_margin_bits_floor(self.block_bytes, &primes)
     }
 
     pub fn sufficient_subset(&self, indices: &[usize]) -> Result<bool, Held> {
@@ -632,7 +684,8 @@ impl QPrismSlice3d {
             ));
         }
         for (idx, prime) in codec.primes.iter().enumerate() {
-            rows.push(format!("Q3DCYL|id={}|idx={}|prime={}|blocks={}|capacity_bits_floor={}|shadow_clone=classical|json=0", slice_id, idx, prime, self.shadows.residues[idx].len(), joint_capacity_bits_floor(&codec.primes[..=idx]).unwrap_or(0)));
+            let cumulative = &codec.primes[..=idx];
+            rows.push(format!("Q3DCYL|id={}|idx={}|prime={}|blocks={}|capacity_bits_floor={}|residual_selector_bits={}|capacity_margin_bits_floor={}|shadow_clone=classical|json=0", slice_id, idx, prime, self.shadows.residues[idx].len(), joint_capacity_bits_floor(cumulative).unwrap_or(0), residual_selector_bits_for(codec.block_bytes, cumulative).unwrap_or(128), signed_capacity_margin_bits_floor(codec.block_bytes, cumulative).unwrap_or(-128)));
         }
         for watcher in ["OMNISHANNON", "GNN", "REVERSE_GNN", "MTP1", "MTP2", "MTP3"] {
             rows.push(format!(

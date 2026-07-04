@@ -138,3 +138,33 @@ fn pie_hbp_rows_are_pixels_first_and_explicitly_classical() {
     assert!(!joined.contains("{"));
     assert!(!joined.to_lowercase().contains("node"));
 }
+
+#[test]
+fn n_q_prism_residual_selector_bits_can_fall_to_two_one_or_zero() {
+    // 16-bit block range. The shared atlas/cylinder context collapses the fiber;
+    // the wire only needs enough selector bits for the remaining candidates.
+    assert_eq!(residual_candidate_count_for(2, &[20_011]).unwrap(), 4);
+    assert_eq!(residual_selector_bits_for(2, &[20_011]).unwrap(), 2);
+    assert!(signed_capacity_margin_bits_floor(2, &[20_011]).unwrap() < 0);
+
+    assert_eq!(residual_candidate_count_for(2, &[32_771]).unwrap(), 2);
+    assert_eq!(residual_selector_bits_for(2, &[32_771]).unwrap(), 1);
+    assert!(signed_capacity_margin_bits_floor(2, &[32_771]).unwrap() < 0);
+
+    assert_eq!(residual_candidate_count_for(2, &[65_537]).unwrap(), 1);
+    assert_eq!(residual_selector_bits_for(2, &[65_537]).unwrap(), 0);
+    assert!(signed_capacity_margin_bits_floor(2, &[65_537]).unwrap() >= 0);
+}
+
+#[test]
+fn q3d_rows_expose_residual_bits_and_capacity_margin() {
+    let codec = MultiCylinder::default_60d();
+    let projection = PieWorldProjection::project(&sample_slice(), &codec);
+    let joined = projection
+        .hbp_rows(&codec, "LIRIS-NQPRISM-BITS-001")
+        .join("\n");
+
+    assert!(joined.contains("residual_selector_bits="));
+    assert!(joined.contains("capacity_margin_bits_floor="));
+    assert!(joined.contains("PIEWATCH|id=LIRIS-NQPRISM-BITS-001|watcher=PIE_SHADOW_ROOF"));
+}
