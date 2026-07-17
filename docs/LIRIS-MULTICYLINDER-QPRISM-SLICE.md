@@ -45,7 +45,11 @@ frozen slice
 
 `DESIGN/CANON_NEXT`: 3D visual PID supervisors, MTP agents, Omnishannon/GNN/reverse-GNN watchers, and live Hilbra cross-fabric synthesis.
 
-`DENY`: this does not claim physical quantum cloning or violation of the no-cloning theorem. Here, cloning means classical replication of representation branches, residues, hashes, and HBP/HBI rows. Classical shadows can be copied; unknown quantum states cannot.
+`DENY`: this crate does not claim physical quantum cloning or violation of the no-cloning
+theorem. Here, cloning means classical replication of representation branches, residues, hashes,
+and HBP/HBI rows. Unknown quantum states cannot be cloned into unrestricted simultaneously readable
+plaintext copies. Separately, [arXiv:2602.10695v1](https://arxiv.org/abs/2602.10695v1) reports
+encrypted single-use quantum cloning on physical hardware; that external protocol is not this crate.
 
 ## Cross-Fabric Synthesis Target
 
