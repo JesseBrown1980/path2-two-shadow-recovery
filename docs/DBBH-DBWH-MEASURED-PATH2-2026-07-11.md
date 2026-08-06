@@ -20,7 +20,7 @@ The operator supplied this as a real completed measurement:
 ```text
 repo=JesseBrown1980/path2-two-shadow-recovery
 head=7d89852e7759aa704e98401457223c732d1ed6c7
-runtime=rustc 1.97
+runtime=rustc 1.81
 seat=third independent container
 result=30/30 green
 prior_seats=acer/WSL + liris
@@ -54,7 +54,7 @@ GPT-5.6 Pro read and cross-checked all current repository surfaces:
   white-room, cube-mint, Dispatcher, HyperHermes, and N-Nest repositories.
 
 The GPT sandbox had no Rust toolchain and no outbound DNS, so it does not misattribute a local cargo
-run to itself. This branch adds a GitHub Actions workflow that installs Rust 1.97.0, enumerates and
+run to itself. This branch adds a GitHub Actions workflow that installs Rust 1.81.0, enumerates and
 asserts exactly 30 tests, runs all targets, and uploads the full test receipt. The workflow is the
 GPT-directed independent execution path.
 
@@ -302,14 +302,14 @@ node.
 
 ### `MEASURED_CLAUDE_FABLE5_THIRD_SEAT`
 
-- operator-supplied rustc 1.97 third-container run: 30/30 green.
+- operator-supplied rustc 1.81 third-container run: 30/30 green.
 
 ### `AUDITED_GPT_5_6_PRO`
 
 - full 1,344-line source audit;
 - complete test/doc audit;
 - cross-repository Path-1/GNN/Q-PRISM/white-room/dispatcher/N-Nest audit;
-- reproducible Rust 1.97 CI workflow added.
+- reproducible Rust 1.81 CI workflow added.
 
 ### `CANON`
 

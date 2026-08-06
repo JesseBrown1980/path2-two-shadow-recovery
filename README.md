@@ -1,5 +1,16 @@
 # path2-two-shadow-recovery
 
+## Toolchain rule (operator, global)
+
+**Rust 1.81 with clippy. Integer arithmetic and ternary (trits) only — never float.**
+
+Pinned in `rust-toolchain.toml` (`channel = "1.81.0"`, `components = ["clippy", "rustfmt"]`),
+declared as `rust-version = "1.81"` in `Cargo.toml`, and enforced in CI by
+`cargo clippy --all-targets -- -D warnings` plus a hard grep that fails the build if any
+`f32`/`f64` appears in `src/` or `tests/`. Sources are currently float-free.
+
+This rule is global to every crate in the corpus and is not to be raised or substituted.
+
 **Path 2 of the shadow-resolution capstone.** Pure Rust, **zero deps**.
 
 Path 1 (the `dbbh-coms-quant-prism` crate) recovers a *retained* object by content address — a
@@ -141,12 +152,12 @@ total                     30
 ```
 
 - `MEASURED_CLAUDE_FABLE5_THIRD_SEAT`: the operator supplied a real Claude Fable 5 run on a third
-  independent container using **rustc 1.97**, **30/30 green**, independent of acer/WSL and liris.
+  independent container using **rustc 1.81**, **30/30 green**, independent of acer/WSL and liris.
 - `AUDITED_GPT_5_6_PRO`: GPT-5.6 Pro read all 1,344 source lines, all tests, both Liris docs, the
   README, and the full Path-1/Q-PRISM/GNN/white-room/dispatcher/N-Nest lineage.
 - The GPT sandbox lacked Rust and outbound DNS, so it does not falsely claim a local cargo run.
-- `CI_GPT_DIRECTED`: `.github/workflows/rust-1.97-independent-verification.yml` installs Rust
-  1.97.0, asserts exactly 30 tests, runs all targets, and uploads the complete receipt.
+- `CI_GPT_DIRECTED`: `.github/workflows/rust-1.81-independent-verification.yml` installs Rust
+  1.81.0, asserts exactly 30 tests, runs all targets, and uploads the complete receipt.
 
 Run locally with:
 

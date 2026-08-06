@@ -687,10 +687,10 @@ pub struct HyperCoord60 {
 impl HyperCoord60 {
     pub fn from_digest(digest: Sha256Digest) -> Self {
         let mut axes = [0u16; 60];
-        for i in 0..60 {
+        for (i, axis) in axes.iter_mut().enumerate() {
             let a = digest.0[(i * 7) % 32] as u16;
             let b = digest.0[(i * 7 + 1) % 32] as u16;
-            axes[i] = ((a << 8) | b) % 1024;
+            *axis = ((a << 8) | b) % 1024;
         }
         Self { axes }
     }
